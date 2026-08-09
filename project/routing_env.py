@@ -84,7 +84,7 @@ class RoutingEnv(gym.Env):
         }
 
     def _get_info(self):
-        action_mask = self._get_valid_actions()
+        action_mask = self._get_action_mask()
 
         return {
             "step_count": self.step_count,
@@ -99,6 +99,9 @@ class RoutingEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed, options=options)
+        '''
+        Initialize source, destination and traffic request based on TM, then update visited, current pos and path
+        '''
 
 
 
@@ -106,6 +109,10 @@ class RoutingEnv(gym.Env):
             '''
             A single step is equal to one hop, when it is performed the residual capacity
             of the used link is updated.
+            Reward is given when a path is completed (src, ..., dest) based on the number of hops, zero if path isn't completed,
+            and a negative reward if it is truncated. 
+            When terminated, it gives a reward computed as: 
+                r = min(residual capacity) - 0.1*avg(#hops)
             The episode is terminated if all traffic requests are processed 
             '''
             pass
@@ -117,15 +124,19 @@ class RoutingEnv(gym.Env):
         traffic_matrix[self.valid_links] = random_loads[self.valid_links]
         return traffic_matrix
 
-    def _get_valid_actions(self):
+    def _get_action_mask(self):
         '''
         Given the current traffic request (tf), extract the row corresponding to the current node i from the residual capacity matrix (RC)
         and check whether:
             tf <= RC[i][j], for every j
         if not, the link ij becomes not valid 
         '''
-        valid_actions = (self.residual_capacity_matrix[self.current_node] <= self.current_request).astype(np.int8)
-        return valid_actions
+        action_mask = (
+            (self.residual_capacity_matrix[self.current_node] <= self.current_request)
+            & (self.visited == 0)
+        ).astype(np.int8)
+    
+        return action_mask
 
 
 
