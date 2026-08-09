@@ -13,7 +13,7 @@ def register_env(env_id: str = ENV_ID):
 
     register(
         id=env_id,
-        entry_point=f"{__name__}:ToyEnv",
+        entry_point=f"{__name__}:RoutingEnv",
     )
 
 
@@ -27,7 +27,7 @@ class RoutingEnv(gym.Env):
         self,
         adjacency_matrix: np.array,
         goal_reward: float = 1.0,
-        step_penalty: float = -0.05,
+        step_penalty: float = 0.0,
         invalid_action_penalty: float = -0.5*12,
         render_mode=None,
     ):
@@ -39,7 +39,7 @@ class RoutingEnv(gym.Env):
         self.valid_links = np.asarray(self.adjacency_matrix) != 0
 
         self.TM :np.array= self._generate_traffic_matrix()
-        self.residual_capacity_matrix :np.array = self.adjacency_matrix
+        self.residual_capacity_matrix :np.array = self.adjacency_matrix.copy()
 
         self.current_valid_actions = np.zeros(self.n, dtype=bool)
 
@@ -54,7 +54,6 @@ class RoutingEnv(gym.Env):
         self.visited = np.zeros(self.n, dtype=np.int64)
         self.hop_count = 0
 
-        self.hop_history = []
         self.path = []
 
         self.goal_reward = goal_reward
@@ -66,10 +65,12 @@ class RoutingEnv(gym.Env):
 
         self.observation_space = gym.spaces.Dict(
             {
-                "current": gym.spaces.Discrete(self.n),
-                "destination": gym.spaces.Discrete(self.n),
+                "current" :gym.spaces.Discrete(self.n),
+                "destination" :gym.spaces.Discrete(self.n),
                 "visited": gym.spaces.MultiBinary(self.n),
-                "link_capacities": gym.spaces.Box(low=0.0, high=1.0, shape=(self.n,self.n), dtype=np.float64)
+                "current_demand" :gym.spaces.Box(low=0.0, high=0.2, shape=(), dtype=np.float64),
+                "link_capacities" :gym.spaces.Box(low=0.0, high=1.0, shape=(self.n,self.n), dtype=np.float64),
+                "traffic_matrix" :gym.spaces.Box(low=0.0, high=1.0, shape=(self.n,self.n), dtype=np.float64)
             }
         )
 
@@ -85,12 +86,13 @@ class RoutingEnv(gym.Env):
         Initialize source, destination and traffic request based on TM, then update visited, current pos and path
         '''
         self.TM = self._generate_traffic_matrix()
-        self.residual_capacity_matrix = self.adjacency_matrix
+        self.residual_capacity_matrix = self.adjacency_matrix.copy()
         self.path = []
 
         self.source, self.destination = np.argwhere(self.TM != 0)[0]
         self.current_node = self.source
 
+        self.total_requests = np.count_nonzero(self.TM)
         self.traffic_request :np.float64 = self.TM[self.source, self.destination]
         
         self.visited = np.zeros(self.n, dtype=np.int64)
@@ -120,7 +122,11 @@ class RoutingEnv(gym.Env):
                 r = min(residual capacity) - 0.1*avg(#hops)
             The episode is terminated if all traffic requests are processed
             After doing the action, check if there is a new available action, if not, truncate the episode. 
+
             '''
+            truncated = False
+            
+
             self.hop_count += 1
             self.current_node = action
             self.visited[action] = 1
@@ -129,25 +135,37 @@ class RoutingEnv(gym.Env):
             node_i, node_j = self.path[-2], self.path[-1]
             self.residual_capacity_matrix[node_i, node_j] -= self.traffic_request
 
+            path_completed = (self.current_node == self.destination)
+
+            terminated = False
+            truncated = False
+
+            if path_completed:
+                completed_hops = self.hop_count
+                self.completed_requests += 1
+                self.TM[self.source, self.destination] = 0
+
+                terminated = (self.completed_requests == self.total_requests)
+                if not terminated:
+                    self._load_next_request()
+
+
             observation = self._get_obs()
             info = self._get_info()
 
-            if self.current_node == self.destination:
-                self._next_request()
-                
-
-            terminated = (self.completed_requests == self.total_requests)
-            truncated = False
-
             no_valid_actions = (info["valid_actions"].size == 0)
+
             if no_valid_actions:
                 truncated = True
                 reward = self.invalid_action_penalty
 
-            if terminated: 
-                reward = np.min(self.residual_capacity_matrix)
-            else:
-                reward = -self.hop_count/self.total_requests
+            elif terminated:
+                reward = np.min(self.residual_capacity_matrix[self.valid_links])
+
+            elif path_completed:
+                reward = -completed_hops / self.total_requests
+            else: 
+                reward = self.step_penalty
 
             if self.render_mode == "human":
                         self.render()
@@ -161,9 +179,8 @@ class RoutingEnv(gym.Env):
             
     
     def _generate_traffic_matrix(self):
-        traffic_matrix = np.zeros((self.n, self.n), dtype=np.float64)
-        random_loads = np.random.randint(0, 201, size=(self.n, self.n)) / 1000
-        traffic_matrix[self.valid_links] = random_loads[self.valid_links]
+        traffic_matrix = self.np_random.integers(0, 2001, size=(self.n, self.n)) / 10000.0
+        np.fill_diagonal(traffic_matrix, 0.0)
         return traffic_matrix
 
 
@@ -171,15 +188,17 @@ class RoutingEnv(gym.Env):
     def _get_obs(self):
         return {
             "current": self.current_node,
-            "destination": self.destination_node,
+            "destination": self.destination,
             "visited": self.visited,
-            "link_capacities": self.residual_capacity_matrix
+            "current_demand": np.float64(self.traffic_request),
+            "link_capacities": self.residual_capacity_matrix,
+            "traffic_matrix" : self.TM
         }
 
     def _get_info(self):
         action_mask = self._get_action_mask()
         return {
-            "step_count": self.step_count,
+            "hop_count": self.hop_count,
             "valid_actions": np.flatnonzero(action_mask),
             "action_mask": action_mask,
         }
@@ -192,15 +211,13 @@ class RoutingEnv(gym.Env):
         and if the node was already visited, and then make and AND between the two conditions 
         '''
         action_mask = (
-            (self.residual_capacity_matrix[self.current_node] <= self.traffic_request)
+            (self.residual_capacity_matrix[self.current_node] >= self.traffic_request)
+            & self.valid_links[self.current_node]
             & (self.visited == 0)
-        ).astype(np.int64)
-    
+        )
         return action_mask
 
-    def _next_request(self):
-        self.completed_requests += 1
-        self.TM[self.source, self.destination] = 0
+    def _load_next_request(self):
         self.path = []
 
         self.source, self.destination = np.argwhere(self.TM != 0)[0]
