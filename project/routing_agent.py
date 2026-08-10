@@ -101,7 +101,6 @@ class Agent():
             self.optimizer = torch.optim.Adam(policy_dqn.parameters(), lr=self.learning_rate_a)
 
             
-            epsilon_history = []
             # Track number of steps taken. Used for syncing policy => target network.
             step_count=0
 
@@ -204,7 +203,7 @@ class Agent():
                 current_time = datetime.now()
 
                 if current_time - last_graph_update_time > timedelta(seconds=10):
-                    self.save_graph(rewards_per_episode, epsilon_history)
+                    self.save_graph(rewards_per_episode)
                     last_graph_update_time = current_time
 
                 # If enough experience has been collected.
@@ -216,33 +215,19 @@ class Agent():
                         epsilon * self.epsilon_decay,
                         self.epsilon_min,
                     )
-                    epsilon_history.append(epsilon)
-
                     if step_count > self.network_sync_rate:
                         target_dqn.load_state_dict(policy_dqn.state_dict())
                         step_count = 0
 
 
-    def save_graph(self, rewards_per_episode, epsilon_history):
-        # Save plots
+    def save_graph(self, rewards_per_episode):
+        # Save rewards plot
         fig = plt.figure(1)
-        # Plot average rewards (Y-axis) vs episodes (X-axis)
-        mean_rewards = np.zeros(len(rewards_per_episode))
-        for x in range(len(mean_rewards)):
-            mean_rewards[x] = np.mean(rewards_per_episode[max(0, x-99):(x+1)])
-        plt.subplot(121) # plot on a 1 row x 2 col grid, at cell 1
-        # plt.xlabel('Episodes')
-        plt.ylabel('Mean Rewards')
-        plt.plot(mean_rewards)
-        # Plot epsilon decay (Y-axis) vs episodes (X-axis)
-        plt.subplot(122) # plot on a 1 row x 2 col grid, at cell 2
-        # plt.xlabel('Time Steps')
-        plt.ylabel('Epsilon Decay')
-        plt.plot(epsilon_history)
+        plt.xlabel('Episodes')
+        plt.ylabel('Rewards')
+        plt.plot(rewards_per_episode)
 
-        plt.subplots_adjust(wspace=1.0, hspace=1.0)
-
-        # Save plots
+        # Save plot
         fig.savefig(self.GRAPH_FILE)
         plt.close(fig)
 

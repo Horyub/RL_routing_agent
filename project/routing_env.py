@@ -4,7 +4,7 @@ from gymnasium.envs.registration import register, registry
 
 
 
-ENV_ID = "RoutingEnv-v2"
+ENV_ID = "RoutingEnv-v3"
 
 
 def register_env(env_id: str = ENV_ID):
@@ -26,9 +26,6 @@ class RoutingEnv(gym.Env):
     def __init__(
         self,
         adjacency_matrix: np.array,
-        goal_reward: float = 1.0,
-        step_penalty: float = 0.0,
-        invalid_action_penalty: float = -0.5*12,
         num_traffic_demands: int = 5,
         ramp_up :bool = True,
         render_mode=None,
@@ -60,12 +57,7 @@ class RoutingEnv(gym.Env):
         self.hop_count = 0
 
         self.path = []
-
-        self.goal_reward = goal_reward
-        self.step_penalty = step_penalty
-        self.invalid_action_penalty = invalid_action_penalty
-
-        
+   
         self.action_space = gym.spaces.Discrete(self.n)
 
         self.observation_space = gym.spaces.Dict(
@@ -119,6 +111,13 @@ class RoutingEnv(gym.Env):
         Reset the environment for a new episode.
         Generate a new traffic matrix, restore link capacities, and load the first traffic request.
         '''
+        self.number_of_episodes +=1 
+
+        if self.number_of_episodes % 1000 == 0 and self.ramp_up:
+            self.total_requests = min(self.total_requests*2, self.max_number_of_requests)
+            if self.total_requests == self.max_number_of_requests:
+                self.ramp_up = False
+
         self.TM = self._generate_traffic_matrix()
         self.residual_capacity_matrix = self.adjacency_matrix.copy()
         self.path = []
@@ -126,7 +125,6 @@ class RoutingEnv(gym.Env):
         self.source, self.destination = np.argwhere(self.TM != 0)[0]
         self.current_node = self.source
 
-        self.total_requests = np.count_nonzero(self.TM)
         self.traffic_request :np.float64 = self.TM[self.source, self.destination]
         
         self.visited = np.zeros(self.n, dtype=np.int64)
@@ -134,7 +132,6 @@ class RoutingEnv(gym.Env):
         self.path.append(self.source)
         self.hop_count = 0
         self.completed_requests = 0
-        self.number_of_episodes +=1 
 
         observation = self._get_obs()
         info = self._get_info()
@@ -185,8 +182,6 @@ class RoutingEnv(gym.Env):
 
             no_valid_actions = (info["valid_actions"].size == 0)
 
-            reward = self.step_penalty
-
             N = self.total_requests
 
             reward = -0.1 / N
@@ -205,10 +200,6 @@ class RoutingEnv(gym.Env):
                 # Failure early is worse than failure late.
                 reward += (progress - 1.0)
 
-            if self.number_of_episodes % 1000 == 0 and self.ramp_up:
-                self.total_requests = min(self.total_requests*2, self.max_number_of_requests)
-                if self.total_requests == self.max_number_of_requests:
-                    self.ramp_up = False
 
             if self.render_mode == "human":
                         self.render()
