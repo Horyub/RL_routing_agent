@@ -4,7 +4,7 @@ from gymnasium.envs.registration import register, registry
 
 
 
-ENV_ID = "RoutingEnv-v0"
+ENV_ID = "RoutingEnv-v2"
 
 
 def register_env(env_id: str = ENV_ID):
@@ -29,6 +29,8 @@ class RoutingEnv(gym.Env):
         goal_reward: float = 1.0,
         step_penalty: float = 0.0,
         invalid_action_penalty: float = -0.5*12,
+        num_traffic_demands: int = 5,
+        ramp_up :bool = True,
         render_mode=None,
     ):
         super().__init__()
@@ -37,7 +39,11 @@ class RoutingEnv(gym.Env):
         self.adjacency_matrix :np.array = adjacency_matrix
         self.n = self.adjacency_matrix.shape[0]
         self.valid_links = np.asarray(self.adjacency_matrix) != 0
-
+        self.number_of_episodes = 0
+        
+        self.ramp_up = ramp_up
+        self.max_number_of_requests = self.n * (self.n -1)
+        self.total_requests = min(num_traffic_demands, self.max_number_of_requests)
         self.TM :np.array= self._generate_traffic_matrix()
         self.residual_capacity_matrix :np.array = self.adjacency_matrix.copy()
 
@@ -47,7 +53,6 @@ class RoutingEnv(gym.Env):
         self.current_node :int = -1
         self.destination :int= -1
 
-        self.total_requests = np.count_nonzero(self.TM)
         self.completed_requests = 0
         self.traffic_request :np.float64 = 0.0
         
@@ -111,7 +116,8 @@ class RoutingEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed, options=options)
         '''
-        Initialize source, destination and traffic request based on TM, then update visited, current pos and path
+        Reset the environment for a new episode.
+        Generate a new traffic matrix, restore link capacities, and load the first traffic request.
         '''
         self.TM = self._generate_traffic_matrix()
         self.residual_capacity_matrix = self.adjacency_matrix.copy()
@@ -128,6 +134,7 @@ class RoutingEnv(gym.Env):
         self.path.append(self.source)
         self.hop_count = 0
         self.completed_requests = 0
+        self.number_of_episodes +=1 
 
         observation = self._get_obs()
         info = self._get_info()
@@ -142,17 +149,12 @@ class RoutingEnv(gym.Env):
 
     def step(self, action):
             '''
-            A single step is equal to one hop, when it is performed the residual capacity
-            of the used link is updated.
-            Reward is given when a path is completed (src, ..., dest) based on the number of hops:
-                r = 0.1 * #hops/#requests
-            zero if path isn't completed,
-            and a negative reward if it is truncated. 
-            When terminated, it gives a reward computed as: 
-                r = min(residual capacity)
-            The episode is terminated if all traffic requests are processed
-            After doing the action, check if there is a new available action, if not, truncate the episode. 
-
+            Move to the selected node and update the capacity of the used link.
+            If the destination is reached, mark the current request as completed and load the next one.
+            The episode terminates when all traffic requests are completed.
+            If there are no valid actions before termination, the episode is truncated.
+            The reward gives a small step penalty, a bonus for completing a request,
+            a final residual-capacity bonus when terminated, and a progress-based penalty when truncated.
             '''
             truncated = False
             
@@ -170,7 +172,6 @@ class RoutingEnv(gym.Env):
             truncated = False
 
             if path_completed:
-                completed_hops = self.hop_count
                 self.completed_requests += 1
                 self.TM[self.source, self.destination] = 0
 
@@ -184,17 +185,30 @@ class RoutingEnv(gym.Env):
 
             no_valid_actions = (info["valid_actions"].size == 0)
 
-            if no_valid_actions:
+            reward = self.step_penalty
+
+            N = self.total_requests
+
+            reward = -0.1 / N
+
+            if path_completed:
+                reward += 1.0 / N
+
+            if terminated:
+                reward += np.min(self.residual_capacity_matrix[self.valid_links])
+
+            elif no_valid_actions:
                 truncated = True
-                reward = self.invalid_action_penalty
 
-            elif terminated:
-                reward = np.min(self.residual_capacity_matrix[self.valid_links])
+                progress = self.completed_requests / N
 
-            elif path_completed:
-                reward = - 0.1 * completed_hops / self.total_requests
-            else: 
-                reward = self.step_penalty
+                # Failure early is worse than failure late.
+                reward += (progress - 1.0)
+
+            if self.number_of_episodes % 1000 == 0 and self.ramp_up:
+                self.total_requests = min(self.total_requests*2, self.max_number_of_requests)
+                if self.total_requests == self.max_number_of_requests:
+                    self.ramp_up = False
 
             if self.render_mode == "human":
                         self.render()
@@ -208,8 +222,14 @@ class RoutingEnv(gym.Env):
             
     
     def _generate_traffic_matrix(self):
-        traffic_matrix = self.np_random.integers(0, 2001, size=(self.n, self.n)) / 10000.0
-        np.fill_diagonal(traffic_matrix, 0.0)
+        traffic_matrix = np.zeros((self.n, self.n), dtype=np.float64)
+        possible_rows, possible_cols = np.where(~np.eye(self.n, dtype=bool))
+        selected = self.np_random.choice(self.max_number_of_requests,size=self.total_requests, replace=False,)
+        rows, cols = possible_rows[selected], possible_cols[selected]
+
+        traffic_matrix[rows, cols] = (
+            self.np_random.integers(1, 201, size=self.total_requests) / 10000.0
+        )
         return traffic_matrix
 
 
@@ -234,10 +254,9 @@ class RoutingEnv(gym.Env):
 
     def _get_action_mask(self):
         '''
-        Given the current traffic request (tf), extract the row corresponding to the current node i from the residual capacity matrix (RC)
-        and check whether:
-            tf <= RC[i][j], for every j
-        and if the node was already visited, and then make and AND between the two conditions 
+        Return the valid next nodes from the current node.
+        A node is valid if the link exists, has enough residual capacity,
+        and has not already been visited in the current path.
         '''
         action_mask = (
             (self.residual_capacity_matrix[self.current_node] >= self.traffic_request)

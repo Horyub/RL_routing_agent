@@ -31,7 +31,7 @@ device = 'cpu' # force cpu
 
 class Agent():
 
-    def __init__(self, hyperparameter_set, adjacency_matrix):
+    def __init__(self, hyperparameter_set, adjacency_matrix :np.array):
         with open('hyperparameters.yml', 'r') as file:
             all_hyperparameter_sets = yaml.safe_load(file)
             hyperparameters = all_hyperparameter_sets[hyperparameter_set]
@@ -51,7 +51,6 @@ class Agent():
         self.epsilon_min        = hyperparameters['epsilon_min']            # minimum epsilon value
         self.stop_on_reward     = hyperparameters['stop_on_reward']         # stop training after reaching this number of rewards
         self.fc1_nodes          = hyperparameters['fc1_nodes']
-        self.env_make_params    = hyperparameters.get('env_make_params',{}) # Get optional environment-specific parameters, default to empty dict
       
         self.loss_fn = nn.MSELoss()          
         self.optimizer = None                
@@ -71,9 +70,13 @@ class Agent():
             print(log_message)
             with open(self.LOG_FILE, 'w') as file:
                 file.write(log_message + '\n')
+        
+            env = gym.make(self.env_id, render_mode='human' if render else None, adjacency_matrix=self.adjacency_matrix)
+        else: 
+            n = self.adjacency_matrix.shape[0]
+            total_requests = n * (n-1)
+            env = gym.make(self.env_id, render_mode='human' if render else None, adjacency_matrix=self.adjacency_matrix, num_traffic_demands=total_requests, ramp_up=False)
 
-        # Use "**self.env_make_params" to pass in environment-specific parameters from hyperparameters.yml.
-        env = gym.make(self.env_id, render_mode='human' if render else None, adjacency_matrix=self.adjacency_matrix, **self.env_make_params)
         env = gym.wrappers.FlattenObservation(env)
 
         num_actions = env.action_space.n
@@ -194,7 +197,6 @@ class Agent():
                     with open(self.LOG_FILE, "a") as file:
                         file.write(log_message + "\n")
                     torch.save(policy_dqn.state_dict(), self.MODEL_FILE)
-
         
                     
 
