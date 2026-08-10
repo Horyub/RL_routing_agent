@@ -76,7 +76,35 @@ class RoutingEnv(gym.Env):
 
 
     def render(self):
-        pass
+        info = self._get_info()
+        path = " -> ".join(str(node) for node in self.path)
+
+        if self.current_node == self.destination:
+            status = "request completed"
+        elif info["valid_actions"].size == 0:
+            status = "blocked / no valid actions"
+        else:
+            status = "running"
+
+        used_edges = list(zip(self.path[:-1], self.path[1:]))
+        used_capacities = [
+            self.residual_capacity_matrix[i, j]
+            for i, j in used_edges
+        ]
+
+        print()
+        print(f"Request:     {self.completed_requests + 1}/{self.total_requests}")
+        print(f"Source:      {self.source}")
+        print(f"Current:     {self.current_node}")
+        print(f"Destination: {self.destination}")
+        print(f"Demand:      {self.traffic_request:.4f}")
+        print(f"Hop count:   {self.hop_count}")
+        print(f"Path:        {path}")
+        print(f"Valid moves: {info['valid_actions'].tolist()}")
+        print(f"Status:      {status}")
+
+        if used_capacities:
+            print(f"Path residual capacities: {[round(c, 4) for c in used_capacities]}")
 
 
 
@@ -116,17 +144,18 @@ class RoutingEnv(gym.Env):
             '''
             A single step is equal to one hop, when it is performed the residual capacity
             of the used link is updated.
-            Reward is given when a path is completed (src, ..., dest) based on the number of hops, zero if path isn't completed,
+            Reward is given when a path is completed (src, ..., dest) based on the number of hops:
+                r = 0.1 * #hops/#requests
+            zero if path isn't completed,
             and a negative reward if it is truncated. 
             When terminated, it gives a reward computed as: 
-                r = min(residual capacity) - 0.1*avg(#hops)
+                r = min(residual capacity)
             The episode is terminated if all traffic requests are processed
             After doing the action, check if there is a new available action, if not, truncate the episode. 
 
             '''
             truncated = False
             
-
             self.hop_count += 1
             self.current_node = action
             self.visited[action] = 1
@@ -163,7 +192,7 @@ class RoutingEnv(gym.Env):
                 reward = np.min(self.residual_capacity_matrix[self.valid_links])
 
             elif path_completed:
-                reward = -completed_hops / self.total_requests
+                reward = - 0.1 * completed_hops / self.total_requests
             else: 
                 reward = self.step_penalty
 
