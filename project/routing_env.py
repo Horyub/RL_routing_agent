@@ -1,20 +1,46 @@
+from pathlib import Path
+
 import gymnasium as gym
 import numpy as np
+import yaml
 from gymnasium.envs.registration import register, registry
 
 
 
-ENV_ID = "RoutingEnv-v3"
+ENV_ID = "RoutingEnv-v4"
+HYPERPARAMETERS_PATH = Path(__file__).with_name("hyperparameters.yml")
+HYPERPARAMETERS_SET = "routing_env"
+
+
+def _update_hyperparameters_env_id(env_id: str):
+    if not HYPERPARAMETERS_PATH.exists():
+        return
+
+    with HYPERPARAMETERS_PATH.open("r", encoding="utf-8") as file:
+        hyperparameters = yaml.safe_load(file) or {}
+
+    env_hyperparameters = hyperparameters.get(HYPERPARAMETERS_SET)
+    if not isinstance(env_hyperparameters, dict):
+        env_hyperparameters = {}
+        hyperparameters[HYPERPARAMETERS_SET] = env_hyperparameters
+
+    if env_hyperparameters.get("env_id") == env_id:
+        return
+
+    env_hyperparameters["env_id"] = env_id
+
+    with HYPERPARAMETERS_PATH.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(hyperparameters, file, sort_keys=False)
 
 
 def register_env(env_id: str = ENV_ID):
-    if env_id in registry:
-        return
+    if env_id not in registry:
+        register(
+            id=env_id,
+            entry_point=f"{__name__}:RoutingEnv",
+        )
 
-    register(
-        id=env_id,
-        entry_point=f"{__name__}:RoutingEnv",
-    )
+    _update_hyperparameters_env_id(env_id)
 
 
 class RoutingEnv(gym.Env):
@@ -41,6 +67,7 @@ class RoutingEnv(gym.Env):
         self.ramp_up = ramp_up
         self.max_number_of_requests = self.n * (self.n -1)
         self.total_requests = min(num_traffic_demands, self.max_number_of_requests)
+        self.request_offset = 10
         self.TM :np.array= self._generate_traffic_matrix()
         self.residual_capacity_matrix :np.array = self.adjacency_matrix.copy()
 
@@ -114,7 +141,7 @@ class RoutingEnv(gym.Env):
         self.number_of_episodes +=1 
 
         if self.number_of_episodes % 1000 == 0 and self.ramp_up:
-            self.total_requests = min(self.total_requests*2, self.max_number_of_requests)
+            self.total_requests = min(self.total_requests+self.request_offset, self.max_number_of_requests)
             if self.total_requests == self.max_number_of_requests:
                 self.ramp_up = False
 

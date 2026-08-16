@@ -59,7 +59,11 @@ class Agent():
         self.LOG_FILE   = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.log')
         self.MODEL_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.pt')
         self.GRAPH_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.png')
-        
+
+        self.exploration_offset = hyperparameters['epsilon_init'] * 0.30
+
+        self.max_mean = -1
+
         
     def run(self, is_training=True, render=False):
         if is_training:
@@ -116,6 +120,8 @@ class Agent():
         for episode in itertools.count():
 
             state, info = env.reset()  
+            if is_training and env.unwrapped.ramp_up and (episode + 1) % 1000 == 0:
+                epsilon = self.exploration_offset
             state = torch.tensor(state, dtype=torch.float, device=device) 
             terminated = False     
             truncated = False      
@@ -172,8 +178,21 @@ class Agent():
                         done,
                         next_action_mask,
                     ))
-
+                    
                     step_count+=1
+
+                    # If enough experience has been collected.
+                    if len(memory) > self.mini_batch_size:
+                        mini_batch = memory.sample(self.mini_batch_size)
+                        self.optimize(mini_batch, policy_dqn, target_dqn)
+    
+                        epsilon = max(
+                            epsilon * self.epsilon_decay,
+                            self.epsilon_min,
+                        )
+                        if step_count > self.network_sync_rate:
+                            target_dqn.load_state_dict(policy_dqn.state_dict())
+                            step_count = 0
 
                 state = new_state
 
@@ -195,7 +214,14 @@ class Agent():
 
                     with open(self.LOG_FILE, "a") as file:
                         file.write(log_message + "\n")
-                    torch.save(policy_dqn.state_dict(), self.MODEL_FILE)
+
+                    if env.unwrapped.ramp_up:
+                      torch.save(policy_dqn.state_dict(), self.MODEL_FILE)
+
+                    elif mean_reward > self.max_mean:
+                      self.max_mean = mean_reward
+                      torch.save(policy_dqn.state_dict(), self.MODEL_FILE)
+
         
                     
 
@@ -206,26 +232,26 @@ class Agent():
                     self.save_graph(rewards_per_episode)
                     last_graph_update_time = current_time
 
-                # If enough experience has been collected.
-                if len(memory) > self.mini_batch_size:
-                    mini_batch = memory.sample(self.mini_batch_size)
-                    self.optimize(mini_batch, policy_dqn, target_dqn)
-
-                    epsilon = max(
-                        epsilon * self.epsilon_decay,
-                        self.epsilon_min,
-                    )
-                    if step_count > self.network_sync_rate:
-                        target_dqn.load_state_dict(policy_dqn.state_dict())
-                        step_count = 0
+               
 
 
     def save_graph(self, rewards_per_episode):
-        # Save rewards plot
-        fig = plt.figure(1)
+        # Save mean rewards plot.
+        window_size = 100
+        mean_rewards = []
+        episode_numbers = []
+
+        for start in range(0, len(rewards_per_episode), window_size):
+            end = min(start + window_size, len(rewards_per_episode))
+            mean_rewards.append(np.mean(rewards_per_episode[start:end]))
+            episode_numbers.append(end)
+
+        fig = plt.figure(figsize=(10, 5))
         plt.xlabel('Episodes')
-        plt.ylabel('Rewards')
-        plt.plot(rewards_per_episode)
+        plt.ylabel(f'Mean Reward Every {window_size} Episodes')
+        plt.plot(episode_numbers, mean_rewards, marker='o')
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.tight_layout()
 
         # Save plot
         fig.savefig(self.GRAPH_FILE)
