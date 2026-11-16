@@ -235,6 +235,153 @@ class Agent():
                
 
 
+    def evaluate(self, checkpoint_path, output_csv, n_tests=200):
+        import csv
+        import hashlib
+        from pathlib import Path
+
+        n = self.adjacency_matrix.shape[0]
+        total_requests = n * (n - 1)
+
+        env = gym.make(
+            self.env_id,
+            adjacency_matrix=self.adjacency_matrix,
+            num_traffic_demands=total_requests,
+            ramp_up=False,
+        )
+        env = gym.wrappers.FlattenObservation(env)
+        base = env.unwrapped
+
+        model = DQN(
+            env.observation_space.shape[0],
+            env.action_space.n,
+            self.fc1_nodes,
+        ).to("cpu")
+
+        weights = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        model.load_state_dict(weights)
+        model.eval()
+
+        results = []
+
+        try:
+            with torch.inference_mode():
+                for test_id in range(n_tests):
+                    # Identical seeds across checkpoints generate identical TMs.
+                    seed = 100_000 + test_id
+                    state, info = env.reset(seed=seed)
+
+                    # Record matrix identity to verify paired comparisons.
+                    tm_hash = hashlib.sha256(
+                        base.TM.copy().tobytes()
+                    ).hexdigest()[:16]
+
+                    episode_reward = 0.0
+                    total_hops = 0
+                    terminated = False
+                    truncated = False
+
+                    while not (terminated or truncated):
+                        mask = np.asarray(info["action_mask"], dtype=bool)
+
+                        if not mask.any():
+                            truncated = True
+                            break
+
+                        state_tensor = torch.as_tensor(
+                            state, dtype=torch.float32
+                        ).unsqueeze(0)
+
+                        q_values = model(state_tensor).squeeze(0)
+                        q_values[~torch.as_tensor(mask)] = -torch.inf
+
+                        # Pure greedy selection: no epsilon exploration.
+                        action = q_values.argmax().item()
+
+                        state, reward, terminated, truncated, info = (
+                            env.step(action)
+                        )
+
+                        episode_reward += float(reward)
+                        total_hops += 1
+
+                    success = (
+                        base.completed_requests == total_requests
+                    )
+
+                    min_rc = float(
+                        base.residual_capacity_matrix[
+                            base.valid_links
+                        ].min()
+                    )
+
+                    results.append({
+                        "seed": seed,
+                        "tm_hash": tm_hash,
+                        "success": int(success),
+                        "completed_requests": base.completed_requests,
+                        "completion_fraction": (
+                            base.completed_requests / total_requests
+                        ),
+                        "episode_reward": episode_reward,
+                        "total_hops": total_hops,
+                        # Only compare complete allocations here.
+                        "mean_hops_success": (
+                            total_hops / total_requests
+                            if success else float("nan")
+                        ),
+                        "min_residual_success": (
+                            min_rc if success else float("nan")
+                        ),
+                        "max_utilization_success": (
+                            1.0 - min_rc if success else float("nan")
+                        ),
+                    })
+        finally:
+            env.close()
+
+        output_path = Path(output_csv)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with output_path.open("w", newline="") as file:
+            writer = csv.DictWriter(
+                file, fieldnames=list(results[0].keys())
+            )
+            writer.writeheader()
+            writer.writerows(results)
+
+        successful = [r for r in results if r["success"]]
+
+        print(f"\nCheckpoint: {checkpoint_path}")
+        print(f"Successful matrices: {len(successful)}/{n_tests}")
+        print(f"Success rate: {100 * len(successful) / n_tests:.1f}%")
+        print(
+            "Mean completion fraction:",
+            f"{np.mean([r['completion_fraction'] for r in results]):.4f}"
+        )
+        print(
+            "Mean evaluation reward:",
+            f"{np.mean([r['episode_reward'] for r in results]):.4f}"
+        )
+
+        if successful:
+            print(
+                "Mean hops/request on successful matrices:",
+                f"{np.mean([r['mean_hops_success'] for r in successful]):.3f}"
+            )
+            print(
+                "Mean minimum residual capacity on successful matrices:",
+                f"{np.mean([r['min_residual_success'] for r in successful]):.4f}"
+            )
+
+        print(f"Episode-level results saved to: {output_path}")
+        return results
+
+
     def save_graph(self, rewards_per_episode):
         # Save mean rewards plot.
         window_size = 100
@@ -306,6 +453,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train or test model.')
     parser.add_argument('hyperparameters', help='')
     parser.add_argument('--train', help='Training mode', action='store_true')
+    parser.add_argument(
+        "--evaluate",
+        metavar="CHECKPOINT",
+        help="Evaluate a saved checkpoint without training.",
+    )
+    parser.add_argument(
+        "--output",
+        default="evaluation/results.csv",
+        help="CSV destination for evaluation results.",
+    )
     args = parser.parse_args()
 
     import numpy as np
@@ -328,7 +485,13 @@ if __name__ == '__main__':
 
     dql = Agent(hyperparameter_set=args.hyperparameters, adjacency_matrix=adjacency_matrix)
 
-    if args.train:
+    if args.evaluate:
+        dql.evaluate(
+            checkpoint_path=args.evaluate,
+            output_csv=args.output,
+            n_tests=200,
+        )
+    elif args.train:
         dql.run(is_training=True)
     else:
         dql.run(is_training=False, render=True)
